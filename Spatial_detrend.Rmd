@@ -1,0 +1,278 @@
+---
+title: "CPSC444_Project"
+author: "Yuting Qiu"
+date: "11/2/2019"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = F)
+```
+
+
+You are expected to submit a word or PDF file (no more than 2 pages). 
+Name your file as YourNetID_CPSC444_ProjectProposal
+The proposal is consisting of 4 parts:
+Introduction:
+The introduction part should introduce the background and justify your research  and include at least one well-defined research goal.
+These goals can consist of:
+Generating a dataset
+Model the effect of explanatory variables or treatments
+Spatial predictions
+Datasets:
+The data part should include a brief description of your study area, the source of your data, and explanation of the variables you are going to use. 
+Methods:
+The methods part should explain clearly the analysis you are planning to apply. Make sure the  methods are feasible. Describe the expected result from the analysis. 
+References:
+Use proper citations for the background, methods and if needed from the dataset.
+
+
+```{r}
+library(readxl)
+library(nlme)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(sp)
+library(lme4)
+library(gstat)
+library(gridExtra)
+```
+
+```{r}
+bi_18 <- read_excel("bi.18.wide.xlsx")
+bs_18 <- read_excel("bs.18.wide.xlsx")
+
+bi_18 %>%
+  select(plot_id,plot,row_num,range_num,rep,audpc) %>% 
+  mutate(rep = factor(rep), plot = factor(plot), audpc=as.numeric(audpc)) -> bi_18.1
+bs_18 %>%
+  select(plot_id,plot,row_num,range_num,rep,audpc) %>% 
+  mutate(rep = factor(rep), plot = factor(plot), audpc=as.numeric(audpc)) -> bs_18.1
+
+
+bi_18.1 <- na.omit(bi_18.1)
+bs_18.1 <- na.omit(bs_18.1)
+```
+
+
+plot the arrangement of the field
+```{r}
+ggplot(bi_18.1, aes(x = range_num, y = row_num)) +
+  geom_tile(aes(fill = plot)) # to create a heatmap
+  theme_bw() + theme(panel.grid = element_blank())
+```
+
+
+```{r}
+m0_bi_PGR <- lme(audpc ~ plot, bi_18.1, random = ~ 1 | rep, na.action = "na.omit")
+anova(m0_bi_PGR, type = "marginal")
+plot(m0_bi_PGR)
+# there is trend left in the residuals
+```
+
+
+```{r}
+# Getting residuals from the model
+bi_18.1$resid_m0 <- residuals(m0_bi_PGR, type = "pearson")
+bi_18.1_sp <- bi_18.1
+coordinates(bi_18.1_sp) <- ~ range_num + row_num # give it coordiantes
+
+# Spatial distribution
+p_resid_m0 <- ggplot(bi_18.1, aes(x = range_num, y = row_num)) +
+  geom_tile(aes(fill = resid_m0)) +
+  theme_bw() + theme(panel.grid = element_blank()) +
+  scale_fill_gradient(low = "darkblue", high = "orange") +
+  ggtitle("Residual plot of 2018_BI population") + 
+  labs(fill = "Residuals of model1") +
+  xlab("row number") +
+  ylab("range number")
+  
+p_resid_m0
+
+# pretty clear spatial trend in this plot
+# there are more negative values at the small row number
+```
+
+
+```{r}
+# Getting residuals from the model: no trend
+vg0_bi<- Variogram(m0_bi_PGR, form = ~ range_num + row_num, resType = "pearson", maxDist = 50)
+plot(vg0_bi, smooth = F, main = "BI population variogram")
+```
+
+This variogram shows some structure, however it was not computed from a model including Xft and Yft as fixed predictors, thus we can not tell how much of that spatial structure can be attributed to the trend or it is structured random variation. To find this out we have to look at the variogram from a model including Xft and Yft as predictors.
+
+
+```{r}
+# Split-plot model with range and row as fixed predictors (for detrending)
+m1_bi_PGR <- lme(audpc ~ plot, bi_18.1, random = ~ 1|rep + 1|range_num + 1|row_num, na.action = "na.omit")
+m1_bi_PG_range <- lme(audpc ~ plot, bi_18.1, random = ~ 1|rep + 1|range_num, na.action = "na.omit")
+anova(m1_bi_PG_range, m1_bi_PGR)
+
+# Getting residuas from model 2
+bi_18.1$resid_m1 <- residuals(m1_bi_PGR, type = "pearson")
+
+# Getting variogram from the model
+vg1_bi <- Variogram(m1_bi_PGR, form = ~ range_num + row_num, resType = "pearson", maxDist = 50)
+plot(vg1_bi, smooth= F)
+# the variogram seems to be much better
+```
+
+Now we can compare the effect of adding range and row for detrending purposes.
+```{r}
+p_resid_m1 <- ggplot(bi_18.1, aes(x = range_num, y = row_num)) +
+  geom_tile(aes(fill = resid_m1)) +
+  scale_fill_gradient(low = "darkblue", high = "orange") + 
+  theme_bw() + theme(panel.grid = element_blank())
+p_resid_m1
+
+grid.arrange( 
+  p_resid_m0 + labs(title = "with trend"),
+  p_resid_m1 + labs(title = "without trend"),
+  nrow = 1,
+  top="BI residual plots"
+)
+
+# Comparing variograms
+grid.arrange(
+  plot(vg0_bi, smooth = F, main = "with trend"),
+  plot(vg1_bi, smooth  =F, main = "without trend"),
+  nrow = 1,
+  top = "BI semivariogram plots"
+)
+```
+
+
+
+```{r}
+# Defining intial parameters of the correlation structure
+cor_sph <- corSpher(value = c(15, 0.9), form = ~ range_num + row_num, nugget = T)
+
+# Updating the model by plugin in the correlation function
+m0_PGR_sph <- update(m0_bi_PGR, . ~ ., cor = cor_sph )
+
+# Comparing non-spatial vs spatial model using LRT
+anova(m0_bi_PGR, m0_PGR_sph) # sig
+anova(m1_bi_PGR, m0_PGR_sph)
+
+m1_PGR_sph <- update(m1_bi_PGR, . ~ ., cor = cor_sph )
+anova(m1_bi_PGR, m1_PGR_sph) # not sig
+
+anova(m0_bi_PGR, m1_bi_PGR) # sig
+
+```
+
+This output shows that there is a reduction of AIC (a gain on logLik) which is significant. This means that a model including the row and range is a better option to explain the variability of the data, but there is no need to include the correlation fucntion in the model.
+
+ 
+
+
+
+
+
+
+
+
+
+
+
+
+
+######## check the bs_18 dataset############
+```{r}
+m0_bs_PGR <- lme(audpc ~ plot, bs_18.1, random = ~ 1 | rep, na.action = "na.omit")
+anova(m0_bs_PGR, type = "marginal")
+plot(m0_bs_PGR)
+# there is trend left in the residuals
+```
+
+
+````{r}
+# Getting residuals from the model
+bs_18.1$resid_m0 <- residuals(m0_bs_PGR, type = "pearson")
+bs_18.1_sp <- bs_18.1
+coordinates(bs_18.1_sp) <- ~ range_num + row_num # give it coordiantes
+
+# Spatial distribution
+p_resid_m0_bs <- ggplot(bs_18.1, aes(x = range_num, y = row_num)) +
+  geom_tile(aes(fill = resid_m0)) +
+  theme_bw() + theme(panel.grid = element_blank()) +
+  scale_fill_gradient(low = "darkblue", high = "orange") +
+  ggtitle("Residual plot of 2018_BS population") + 
+  labs(fill = "Residuals of model1") +
+  xlab("row number") +
+  ylab("range number")
+p_resid_m0_bs
+
+# pretty clear spatial trend in this plot
+# there are more negative values at the small row number
+```
+
+
+```{r}
+# Getting residuals from the model: no trend
+vg0_bs<- Variogram(m0_bs_PGR, form = ~ range_num + row_num, resType = "pearson", maxDist = 50)
+plot(vg0_bs, smooth = F, main="BS population variogram")
+```
+
+This variogram shows some structure, however it was not computed from a model including Xft and Yft as fixed predictors, thus we can not tell how much of that spatial structure can be attributed to the trend or it is structured random variation. To find this out we have to look at the variogram from a model including Xft and Yft as predictors.
+
+
+```{r}
+# Split-plot model with range and row as fixed predictors (for detrending)
+m1_bs_PGR <- lme(audpc ~ plot, bs_18.1, random = ~ 1 | rep + 1|range_num + 1|row_num, na.action = "na.omit")
+
+# Getting residuas from model 2
+bs_18.1$resid_m1 <- residuals(m1_bs_PGR, type = "pearson")
+
+# Getting variogram from the model
+vg1_bs <- Variogram(m1_bs_PGR, form = ~ range_num + row_num, resType = "pearson", maxDist = 50)
+plot(vg1_bs, smooth= F)
+# the variogram seems to be much better
+```
+
+Now we can compare the effect of adding range and row for detrending purposes.
+```{r}
+p_resid_m1_bs <- ggplot(bs_18.1, aes(x = range_num, y = row_num)) +
+  geom_tile(aes(fill = resid_m1)) +
+  scale_fill_gradient(low = "darkblue", high = "orange") + 
+  theme_bw() + theme(panel.grid = element_blank())
+p_resid_m1_bs
+
+grid.arrange( 
+  p_resid_m0_bs + labs(title = "with trend"),
+  p_resid_m1_bs + labs(title = "without trend"),
+  nrow = 1,
+   top="BS populationresidual plots"
+)
+
+# Comparing variograms
+grid.arrange(
+  plot(vg0_bs, smooth = F, main = "with trend"),
+  plot(vg1_bs, smooth  =F, main = "without trend"),
+  nrow = 1,
+  top="BS semivariogram plots"
+)
+```
+
+
+```{r}
+# Defining intial parameters of the correlation structure
+cor_sph_bs <- corSpher(value = c(25, 0.8), form = ~ range_num + row_num, nugget = T)
+
+# Updating the model by plugin in the correlation function
+m0_PGR_sph_bs <- update(m0_bs_PGR, . ~ ., cor = cor_sph_bs )
+m1_PGR_sph_bs <- update(m1_bs_PGR, . ~ ., cor = cor_sph_bs )
+
+# Comparing non-spatial vs spatial model using LRT
+anova(m0_bs_PGR, m0_PGR_sph_bs) # not sig
+
+anova(m1_bs_PGR, m1_PGR_sph_bs) # not sig
+
+anova(m0_bi_PGR, m1_bi_PGR) # sig
+```
+based on the previous outputs of the test form differnt models, the model with row and range effect perform much better; but there is no need to include the correlation function after including row and range within the model.   
+
+
+
